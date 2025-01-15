@@ -206,7 +206,7 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 		tokenMapMux.Lock()
 		delete(tokenMap, userID)
 		tokenMapMux.Unlock()
-		continue
+		return
 	}
 
 	for _, channel := range myUnreadChannels {
