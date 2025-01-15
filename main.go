@@ -9,12 +9,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"github.com/traPtitech/go-traq"
 	"github.com/traPtitech/go-traq-oauth2"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/oauth2"
 )
 
@@ -35,12 +38,22 @@ var oauth2Config = oauth2.Config{
 	Scopes:       []string{traqoauth2.ScopeRead, traqoauth2.ScopeWrite},
 }
 
-// TODO: use DB
-var tokenMap = make(map[string]*oauth2.Token)
-var tokenMapMux sync.RWMutex
-
 var apiClient = traq.NewAPIClient(traq.NewConfiguration())
 var botAccessToken = os.Getenv("TRAQ_BOT_ACCESS_TOKEN")
+
+var mongoClient *mongo.Client
+var mongoURI = os.Getenv("MONGODB_URI")
+var dbName = os.Getenv("MONGODB_DATABASE")
+
+const collectionNameToken = "tokens"
+
+type TokenSchema struct {
+	ID           uuid.UUID `bson:"_id"` // traQ userID
+	AccessToken  string
+	TokenType    string
+	RefreshToken string
+	Expiry       time.Time
+}
 
 //go:embed index.html
 var indexHTML string
@@ -48,6 +61,22 @@ var indexHTML string
 func main() {
 	// Register oauth2.Token to gob for session
 	gob.Register(&oauth2.Token{})
+
+	_mongoClient, err := mongo.Connect(context.Background(),
+		options.
+			Client().
+			ApplyURI(mongoURI).
+			SetServerAPIOptions(options.ServerAPI(options.ServerAPIVersion1)),
+	)
+	if err != nil {
+		panic(err)
+	}
+	mongoClient = _mongoClient
+	defer func() {
+		if err := mongoClient.Disconnect(context.Background()); err != nil {
+			panic(err)
+		}
+	}()
 
 	go runClearner()
 
@@ -60,7 +89,7 @@ func main() {
 	http.HandleFunc("GET /oauth2/callback", callbackHandler)
 
 	slog.Info("Server starting...", "addr", addr)
-	go panic(http.ListenAndServe(addr, nil))
+	panic(http.ListenAndServe(addr, nil)) // TODO: graceful shutdown
 }
 
 func runClearner() {
@@ -68,13 +97,28 @@ func runClearner() {
 	for {
 		t := <-ticker.C
 
-		slog.Info("tick start", "time", t, "#tokens", len(tokenMap))
+		ctx := context.Background()
 
-		if len(tokenMap) == 0 {
+		collection := mongoClient.Database(dbName).Collection(collectionNameToken)
+		cursor, err := collection.Find(ctx, bson.D{})
+		if err != nil {
+			slog.Error("find tokens", "err", err)
 			continue
 		}
 
-		ctx := context.WithValue(context.Background(), traq.ContextAccessToken, botAccessToken)
+		var tokens []TokenSchema
+		if err := cursor.All(ctx, &tokens); err != nil {
+			slog.Error("iterate cursor", "err", err)
+			continue
+		}
+
+		slog.Info("tick start", "time", t, "#tokens", len(tokens))
+
+		if len(tokens) == 0 {
+			continue
+		}
+
+		ctx = context.WithValue(ctx, traq.ContextAccessToken, botAccessToken)
 		users, resp, err := apiClient.UserApi.GetUsers(ctx).IncludeSuspended(true).Execute()
 		if err != nil {
 			slog.ErrorContext(ctx, "get users", "err", err)
@@ -87,14 +131,17 @@ func runClearner() {
 			userMap[user.Id] = user
 		}
 
-		tokenMapMux.RLock()
-		for userID, token := range tokenMap {
+		for _, token := range tokens {
 			ctx := context.Background()
-			tokenSource := oauth2Config.TokenSource(ctx, token)
+			tokenSource := oauth2Config.TokenSource(ctx, &oauth2.Token{
+				AccessToken:  token.AccessToken,
+				TokenType:    token.TokenType,
+				RefreshToken: token.RefreshToken,
+				Expiry:       token.Expiry,
+			})
 			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
-			go clearUnreadMessages(ctx, userID, userMap)
+			go clearUnreadMessages(ctx, token.ID.String(), userMap)
 		}
-		tokenMapMux.RUnlock()
 	}
 }
 
@@ -172,13 +219,24 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	myUser, resp, err := apiClient.MeApi.GetMe(ctx).Execute()
 	if err != nil {
 		internalHTTPError(w, err, "failed to get my user info")
+		return
 	} else if resp.StatusCode != http.StatusOK {
 		internalHTTPError(w, fmt.Errorf("invalid status: %d", resp.StatusCode), "failed to get my user info")
+		return
 	}
 
-	tokenMapMux.Lock()
-	tokenMap[myUser.Id] = token
-	tokenMapMux.Unlock()
+	collection := mongoClient.Database(dbName).Collection(collectionNameToken)
+	doc := TokenSchema{
+		ID:           uuid.MustParse(myUser.Id),
+		AccessToken:  token.AccessToken,
+		TokenType:    token.TokenType,
+		RefreshToken: token.RefreshToken,
+		Expiry:       token.Expiry,
+	}
+	if _, err := collection.InsertOne(ctx, doc); err != nil {
+		internalHTTPError(w, err, "failed to insert tokencollection")
+		return
+	}
 
 	session.Values["token"] = token
 	if err := session.Save(r, w); err != nil {
@@ -203,9 +261,11 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		notifyFromBot(userID, "BOT未読を自動で消化するために再認可を行ってください")
-		tokenMapMux.Lock()
-		delete(tokenMap, userID)
-		tokenMapMux.Unlock()
+		collection := mongoClient.Database(dbName).Collection(collectionNameToken)
+		filter := bson.D{{Key: "_id", Value: userID}}
+		if _, err := collection.DeleteOne(ctx, filter); err != nil {
+			slog.ErrorContext(ctx, "delete token collection", "err", err)
+		}
 		return
 	}
 
