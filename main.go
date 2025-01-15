@@ -48,55 +48,7 @@ func main() {
 	// Register oauth2.Token to gob for session
 	gob.Register(&oauth2.Token{})
 
-	go func() {
-		ticker := time.NewTicker(time.Minute) // TODO: use WebSocket
-		for {
-			t := <-ticker.C
-
-			tokenMapMux.RLock()
-			defer tokenMapMux.RUnlock()
-
-			slog.Info("tick start", "time", t, "#tokens", len(tokenMap))
-
-			if len(tokenMap) == 0 {
-				continue
-			}
-
-			var randomToken *oauth2.Token
-			for _, token := range tokenMap {
-				randomToken = token
-				break
-			}
-
-			ctx := context.Background()
-			tokenSource := oauth2Config.TokenSource(ctx, randomToken)
-			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
-			users, resp, err := apiClient.UserApi.GetUsers(ctx).IncludeSuspended(true).Execute()
-			if err != nil {
-				slog.ErrorContext(ctx, "get users", "err", err)
-			} else if resp.StatusCode != http.StatusOK {
-				slog.ErrorContext(ctx, "get users", "status", resp.Status, "statusCode", resp.StatusCode)
-			}
-
-			userMap := make(map[string]traq.User, len(users))
-			for _, user := range users {
-				userMap[user.Id] = user
-			}
-
-			var wg sync.WaitGroup
-			wg.Add(len(tokenMap))
-			for _, token := range tokenMap {
-				ctx := context.Background()
-				tokenSource := oauth2Config.TokenSource(ctx, token)
-				ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
-				go func(ctx context.Context) {
-					clearUnreadMessages(ctx, userMap)
-					wg.Done()
-				}(ctx)
-			}
-			wg.Wait()
-		}
-	}()
+	go runClearner()
 
 	http.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -108,6 +60,56 @@ func main() {
 
 	slog.Info("Server starting...", "addr", addr)
 	go panic(http.ListenAndServe(addr, nil))
+}
+
+func runClearner() {
+	ticker := time.NewTicker(time.Minute) // TODO: use WebSocket
+	for {
+		t := <-ticker.C
+
+		tokenMapMux.RLock()
+		defer tokenMapMux.RUnlock()
+
+		slog.Info("tick start", "time", t, "#tokens", len(tokenMap))
+
+		if len(tokenMap) == 0 {
+			continue
+		}
+
+		var randomToken *oauth2.Token
+		for _, token := range tokenMap {
+			randomToken = token
+			break
+		}
+
+		ctx := context.Background()
+		tokenSource := oauth2Config.TokenSource(ctx, randomToken)
+		ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
+		users, resp, err := apiClient.UserApi.GetUsers(ctx).IncludeSuspended(true).Execute()
+		if err != nil {
+			slog.ErrorContext(ctx, "get users", "err", err)
+		} else if resp.StatusCode != http.StatusOK {
+			slog.ErrorContext(ctx, "get users", "status", resp.Status, "statusCode", resp.StatusCode)
+		}
+
+		userMap := make(map[string]traq.User, len(users))
+		for _, user := range users {
+			userMap[user.Id] = user
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(len(tokenMap))
+		for _, token := range tokenMap {
+			ctx := context.Background()
+			tokenSource := oauth2Config.TokenSource(ctx, token)
+			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
+			go func(ctx context.Context) {
+				clearUnreadMessages(ctx, userMap)
+				wg.Done()
+			}(ctx)
+		}
+		wg.Wait()
+	}
 }
 
 func authorizeHandler(w http.ResponseWriter, r *http.Request) {
