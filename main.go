@@ -210,7 +210,7 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 	}
 
 	for _, channel := range myUnreadChannels {
-		if channel.Count == 0 {
+		if channel.Count == 0 || channel.Noticeable {
 			continue
 		}
 
