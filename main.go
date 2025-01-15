@@ -36,6 +36,7 @@ var oauth2Config = oauth2.Config{
 
 // TODO: use DB
 var tokenMap = make(map[string]*oauth2.Token)
+var tokenMapMux sync.RWMutex
 
 var apiClient = traq.NewAPIClient(traq.NewConfiguration())
 
@@ -47,6 +48,9 @@ func main() {
 		ticker := time.NewTicker(time.Minute) // TODO: use WebSocket
 		for {
 			t := <-ticker.C
+
+			tokenMapMux.RLock()
+			defer tokenMapMux.RUnlock()
 
 			slog.Info("tick start", "time", t, "#tokens", len(tokenMap))
 
@@ -175,7 +179,9 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 		internalHTTPError(w, fmt.Errorf("invalid status: %d", resp.StatusCode), "failed to get my user info")
 	}
 
+	tokenMapMux.Lock()
 	tokenMap[myUser.Id] = token
+	tokenMapMux.Unlock()
 
 	session.Values["token"] = token
 	if err := session.Save(r, w); err != nil {
