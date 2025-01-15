@@ -40,6 +40,7 @@ var tokenMap = make(map[string]*oauth2.Token)
 var tokenMapMux sync.RWMutex
 
 var apiClient = traq.NewAPIClient(traq.NewConfiguration())
+var botAccessToken = os.Getenv("TRAQ_BOT_ACCESS_TOKEN")
 
 //go:embed index.html
 var indexHTML string
@@ -76,15 +77,7 @@ func runClearner() {
 			continue
 		}
 
-		var randomToken *oauth2.Token
-		for _, token := range tokenMap {
-			randomToken = token
-			break
-		}
-
-		ctx := context.Background()
-		tokenSource := oauth2Config.TokenSource(ctx, randomToken)
-		ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
+		ctx := context.WithValue(context.Background(), traq.ContextAccessToken, botAccessToken)
 		users, resp, err := apiClient.UserApi.GetUsers(ctx).IncludeSuspended(true).Execute()
 		if err != nil {
 			slog.ErrorContext(ctx, "get users", "err", err)
@@ -99,12 +92,12 @@ func runClearner() {
 
 		var wg sync.WaitGroup
 		wg.Add(len(tokenMap))
-		for _, token := range tokenMap {
+		for userID, token := range tokenMap {
 			ctx := context.Background()
 			tokenSource := oauth2Config.TokenSource(ctx, token)
 			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
 			go func(ctx context.Context) {
-				clearUnreadMessages(ctx, userMap)
+				clearUnreadMessages(ctx, userID, userMap)
 				wg.Done()
 			}(ctx)
 		}
@@ -208,12 +201,20 @@ func internalHTTPError(w http.ResponseWriter, err error, msg string) {
 	http.Error(w, msg, http.StatusInternalServerError)
 }
 
-func clearUnreadMessages(ctx context.Context, userMap map[string]traq.User) {
+func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]traq.User) {
 	myUnreadChannels, resp, err := apiClient.MeApi.GetMyUnreadChannels(ctx).Execute()
 	if err != nil {
 		slog.ErrorContext(ctx, "get my unread channels", "err", err)
 	} else if resp.StatusCode != http.StatusOK {
 		slog.ErrorContext(ctx, "get my unread channels", "status", resp.Status, "statusCode", resp.StatusCode)
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			notifyFromBot(ctx, userID, "BOT未読を自動で消化するために再認可を行ってください")
+
+			tokenMapMux.Lock()
+			delete(tokenMap, userID)
+			tokenMapMux.Unlock()
+		}
 	}
 
 	for _, channel := range myUnreadChannels {
@@ -248,5 +249,17 @@ func clearUnreadMessages(ctx context.Context, userMap map[string]traq.User) {
 		} else if resp.StatusCode != http.StatusNoContent {
 			l.ErrorContext(ctx, "clear unread messages", "status", resp.Status, "statusCode", resp.StatusCode)
 		}
+	}
+}
+
+func notifyFromBot(ctx context.Context, userID string, content string) {
+	ctx = context.WithValue(ctx, traq.ContextAccessToken, botAccessToken)
+	_, resp, err := apiClient.MessageApi.PostDirectMessage(ctx, userID).
+		PostMessageRequest(traq.PostMessageRequest{Content: content}).
+		Execute()
+	if err != nil {
+		slog.ErrorContext(ctx, "post bot message", "err", err)
+	} else if resp.StatusCode != http.StatusNoContent {
+		slog.ErrorContext(ctx, "post bot message", "status", resp.Status, "statusCode", resp.StatusCode)
 	}
 }
