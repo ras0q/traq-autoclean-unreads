@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/gob"
 	"fmt"
 	"log/slog"
@@ -39,6 +40,9 @@ var tokenMap = make(map[string]*oauth2.Token)
 var tokenMapMux sync.RWMutex
 
 var apiClient = traq.NewAPIClient(traq.NewConfiguration())
+
+//go:embed index.html
+var indexHTML string
 
 func main() {
 	// Register oauth2.Token to gob for session
@@ -94,6 +98,11 @@ func main() {
 		}
 	}()
 
+	http.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, indexHTML)
+	})
 	http.HandleFunc("POST /oauth2/authorize", authorizeHandler)
 	http.HandleFunc("GET /oauth2/callback", callbackHandler)
 
