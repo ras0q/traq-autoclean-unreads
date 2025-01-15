@@ -200,14 +200,13 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 		slog.ErrorContext(ctx, "get my unread channels", "err", err)
 	} else if resp.StatusCode != http.StatusOK {
 		slog.ErrorContext(ctx, "get my unread channels", "status", resp.Status, "statusCode", resp.StatusCode)
-
-		if resp.StatusCode == http.StatusUnauthorized {
-			notifyFromBot(ctx, userID, "BOT未読を自動で消化するために再認可を行ってください")
-
-			tokenMapMux.Lock()
-			delete(tokenMap, userID)
-			tokenMapMux.Unlock()
-		}
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		notifyFromBot(ctx, userID, "BOT未読を自動で消化するために再認可を行ってください")
+		tokenMapMux.Lock()
+		delete(tokenMap, userID)
+		tokenMapMux.Unlock()
+		continue
 	}
 
 	for _, channel := range myUnreadChannels {
