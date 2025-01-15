@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/gob"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -34,7 +35,7 @@ var oauth2Config = oauth2.Config{
 }
 
 // TODO: use DB
-var tokens = []*oauth2.Token{}
+var tokenMap = make(map[string]*oauth2.Token)
 
 var apiClient = traq.NewAPIClient(traq.NewConfiguration())
 
@@ -47,14 +48,20 @@ func main() {
 		for {
 			t := <-ticker.C
 
-			slog.Info("tick start", "time", t, "#tokens", len(tokens))
+			slog.Info("tick start", "time", t, "#tokens", len(tokenMap))
 
-			if len(tokens) == 0 {
+			if len(tokenMap) == 0 {
 				continue
 			}
 
+			var randomToken *oauth2.Token
+			for _, token := range tokenMap {
+				randomToken = token
+				break
+			}
+
 			ctx := context.Background()
-			tokenSource := oauth2Config.TokenSource(ctx, tokens[0])
+			tokenSource := oauth2Config.TokenSource(ctx, randomToken)
 			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
 			users, resp, err := apiClient.UserApi.GetUsers(ctx).IncludeSuspended(true).Execute()
 			if err != nil {
@@ -69,8 +76,8 @@ func main() {
 			}
 
 			var wg sync.WaitGroup
-			wg.Add(len(tokens))
-			for _, token := range tokens {
+			wg.Add(len(tokenMap))
+			for _, token := range tokenMap {
 				ctx := context.Background()
 				tokenSource := oauth2Config.TokenSource(ctx, token)
 				ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
@@ -83,12 +90,11 @@ func main() {
 		}
 	}()
 
-	http.HandleFunc("/oauth2/authorize", authorizeHandler)
-	http.HandleFunc("/oauth2/callback", callbackHandler)
+	http.HandleFunc("POST /oauth2/authorize", authorizeHandler)
+	http.HandleFunc("GET /oauth2/callback", callbackHandler)
 
 	slog.Info("Server starting...", "addr", addr)
 	go panic(http.ListenAndServe(addr, nil))
-
 }
 
 func authorizeHandler(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +165,17 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokens = append(tokens, token)
+	ctx := r.Context()
+	tokenSource := oauth2Config.TokenSource(ctx, token)
+	ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
+	myUser, resp, err := apiClient.MeApi.GetMe(ctx).Execute()
+	if err != nil {
+		internalHTTPError(w, err, "failed to get my user info")
+	} else if resp.StatusCode != http.StatusOK {
+		internalHTTPError(w, fmt.Errorf("invalid status: %d", resp.StatusCode), "failed to get my user info")
+	}
+
+	tokenMap[myUser.Id] = token
 
 	session.Values["token"] = token
 	if err := session.Save(r, w); err != nil {
