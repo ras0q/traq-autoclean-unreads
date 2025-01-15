@@ -202,7 +202,7 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 		slog.ErrorContext(ctx, "get my unread channels", "status", resp.Status, "statusCode", resp.StatusCode)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		notifyFromBot(ctx, userID, "BOT未読を自動で消化するために再認可を行ってください")
+		notifyFromBot(userID, "BOT未読を自動で消化するために再認可を行ってください")
 		tokenMapMux.Lock()
 		delete(tokenMap, userID)
 		tokenMapMux.Unlock()
@@ -244,8 +244,8 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 	}
 }
 
-func notifyFromBot(ctx context.Context, userID string, content string) {
-	ctx = context.WithValue(ctx, traq.ContextAccessToken, botAccessToken)
+func notifyFromBot(userID string, content string) {
+	ctx := context.WithValue(context.Background(), traq.ContextAccessToken, botAccessToken)
 	_, resp, err := apiClient.MessageApi.PostDirectMessage(ctx, userID).
 		PostMessageRequest(traq.PostMessageRequest{Content: content}).
 		Execute()
