@@ -68,9 +68,6 @@ func runClearner() {
 	for {
 		t := <-ticker.C
 
-		tokenMapMux.RLock()
-		defer tokenMapMux.RUnlock()
-
 		slog.Info("tick start", "time", t, "#tokens", len(tokenMap))
 
 		if len(tokenMap) == 0 {
@@ -90,18 +87,14 @@ func runClearner() {
 			userMap[user.Id] = user
 		}
 
-		var wg sync.WaitGroup
-		wg.Add(len(tokenMap))
+		tokenMapMux.RLock()
 		for userID, token := range tokenMap {
 			ctx := context.Background()
 			tokenSource := oauth2Config.TokenSource(ctx, token)
 			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
-			go func(ctx context.Context) {
-				clearUnreadMessages(ctx, userID, userMap)
-				wg.Done()
-			}(ctx)
+			go clearUnreadMessages(ctx, userID, userMap)
 		}
-		wg.Wait()
+		tokenMapMux.RUnlock()
 	}
 }
 
