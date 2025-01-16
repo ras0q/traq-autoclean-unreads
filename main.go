@@ -121,7 +121,7 @@ func runClearner() {
 			continue
 		}
 
-		slog.Info("tick start", "time", t, "#tokens", len(tokens))
+		slog.Debug("tick start", "time", t, "#tokens", len(tokens))
 
 		if len(tokens) == 0 {
 			continue
