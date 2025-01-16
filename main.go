@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -65,13 +66,15 @@ func main() {
 	_mongoClient, err := mongo.Connect(context.Background(),
 		options.
 			Client().
-			ApplyURI(fmt.Sprintf("mongodb://%s:%s", os.Getenv("MONGODB_HOSTNAME"), os.Getenv("MONGODB_PORT"))).
-			SetAuth(options.Credential{
-				AuthMechanism: "SCRAM-SHA-256",
-				Username:      os.Getenv("MONGODB_USER"),
-				Password:      os.Getenv("MONGODB_PASSWORD"),
-			}).
-			SetServerAPIOptions(options.ServerAPI(options.ServerAPIVersion1)),
+			ApplyURI(
+				fmt.Sprintf(
+					"mongodb://%s:%s@%s:%s",
+					url.QueryEscape(os.Getenv("MONGODB_USER")),
+					url.QueryEscape(os.Getenv("MONGODB_PASSWORD")),
+					os.Getenv("MONGODB_HOSTNAME"),
+					os.Getenv("MONGODB_PORT"),
+				),
+			),
 	)
 	if err != nil {
 		panic(err)
