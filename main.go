@@ -68,11 +68,12 @@ func main() {
 			Client().
 			ApplyURI(
 				fmt.Sprintf(
-					"mongodb://%s:%s@%s:%s",
+					"mongodb://%s:%s@%s:%s/%s",
 					url.QueryEscape(os.Getenv("MONGODB_USER")),
 					url.QueryEscape(os.Getenv("MONGODB_PASSWORD")),
-					os.Getenv("MONGODB_HOSTNAME"),
+					url.PathEscape(os.Getenv("MONGODB_HOSTNAME")),
 					os.Getenv("MONGODB_PORT"),
+					url.QueryEscape(dbName),
 				),
 			),
 	)
