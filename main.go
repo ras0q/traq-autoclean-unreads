@@ -1,10 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	_ "embed"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -71,6 +73,8 @@ type CELInput struct {
 	UserMap  map[string]traq.User
 }
 
+const defaultFilter = "input.Channel.Count > 0 && !input.Channel.Noticeable && input.Messages.all(m, input.UserMap[m.UserId].Bot)"
+
 var celEnv, _ = cel.NewEnv(
 	cel.Variable("input", cel.ObjectType("main.CELInput")),
 	ext.NativeTypes(
@@ -115,11 +119,7 @@ func main() {
 
 	go runClearner()
 
-	http.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, indexHTML)
-	})
+	http.HandleFunc("GET /", indexHandler)
 	http.HandleFunc("POST /oauth2/authorize", authorizeHandler)
 	http.HandleFunc("GET /oauth2/callback", callbackHandler)
 
@@ -194,7 +194,7 @@ func runClearner() {
 			})
 			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
 
-			filter := "input.Channel.Count > 0 && !input.Channel.Noticeable && input.Messages.all(m, input.UserMap[m.UserId].Bot)"
+			filter := defaultFilter
 			setting, ok := settingMap[token.ID.String()]
 			if ok && len(setting.Filter) > 0 {
 				filter = setting.Filter
@@ -299,6 +299,51 @@ func evaluateCEL(ctx context.Context, celProgram string, input CELInput) (bool, 
 	return outputBool, nil
 }
 
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	session, err := store.Get(r, sessionName)
+	if err != nil {
+		internalHTTPError(w, err, "failed to get session")
+		return
+	}
+
+	var userID string
+	if _userID, ok := session.Values["user_id"]; ok {
+		userID = _userID.(string)
+	}
+
+	var setting SettingSchema
+	collection := mongoClient.Database(dbName).Collection(collectionNameSetting)
+	err = collection.FindOne(r.Context(), bson.D{{Key: "_id", Value: userID}}).Decode(&setting)
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		internalHTTPError(w, err, "failed to get setting")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>traq-autoclean-unreads</title>
+</head>
+<body>
+    <h1>traq-autoclean-unreads</h1>
+    <p>定期的に各チャンネルの未読状況を確認し、BOT以外の投稿がなければ自動でそのチャンネルの未読を消化します。</p>
+    <p>UserID: %s</p>
+    <p>Filter: <code>%s</code></p>
+    <form method="POST" action="/oauth2/authorize">
+        <button type="submit">Authorize</button>
+    </form>
+    <p>トークンの破棄はまだ実装されていません。直接<a href="https://q.trap.jp/settings/session">traQ</a>から行ってね。</p>
+</body>
+</html>`,
+		cmp.Or(userID, "未ログイン"),
+		cmp.Or(setting.Filter, defaultFilter),
+	)
+}
+
 func authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	session, err := store.Get(r, sessionName)
 	if err != nil {
@@ -397,6 +442,8 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session.Values["token"] = token
+	session.Values["user_id"] = myUser.Id
+	session.Values["username"] = myUser.Name
 	if err := session.Save(r, w); err != nil {
 		internalHTTPError(w, err, "failed to save session")
 		return
