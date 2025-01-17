@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"time"
 
+	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/ext"
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"github.com/traPtitech/go-traq"
-	"github.com/traPtitech/go-traq-oauth2"
+	traqoauth2 "github.com/traPtitech/go-traq-oauth2"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -47,6 +50,7 @@ var mongoURI = os.Getenv("MONGODB_URI")
 var dbName = os.Getenv("MONGODB_DATABASE")
 
 const collectionNameToken = "tokens"
+const collectionNameSetting = "settings"
 
 type TokenSchema struct {
 	ID           uuid.UUID `bson:"_id"` // traQ userID
@@ -56,12 +60,19 @@ type TokenSchema struct {
 	Expiry       time.Time
 }
 
+type SettingSchema struct {
+	ID     uuid.UUID `bson:"_id"` // traQ userID
+	Filter string    // CEL (https://cel.dev/) evaluation
+}
+
 //go:embed index.html
 var indexHTML string
 
 func main() {
 	// Register oauth2.Token to gob for session
 	gob.Register(&oauth2.Token{})
+
+	// slog.SetLogLoggerLevel(slog.LevelDebug)
 
 	_mongoClient, err := mongo.Connect(context.Background(),
 		options.
@@ -127,6 +138,24 @@ func runClearner() {
 			continue
 		}
 
+		collection = mongoClient.Database(dbName).Collection(collectionNameSetting)
+		cursor, err = collection.Find(ctx, bson.D{})
+		if err != nil {
+			slog.Error("find tokens", "err", err)
+			continue
+		}
+
+		var settings []SettingSchema
+		if err := cursor.All(ctx, &settings); err != nil {
+			slog.Error("iterate cursor", "err", err)
+			continue
+		}
+
+		settingMap := make(map[string]SettingSchema, len(settings))
+		for _, setting := range settings {
+			settingMap[setting.ID.String()] = setting
+		}
+
 		ctx = context.WithValue(ctx, traq.ContextAccessToken, botAccessToken)
 		users, resp, err := apiClient.UserApi.GetUsers(ctx).IncludeSuspended(true).Execute()
 		if err != nil {
@@ -149,7 +178,13 @@ func runClearner() {
 				Expiry:       token.Expiry,
 			})
 			ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
-			go clearUnreadMessages(ctx, token.ID.String(), userMap)
+
+			filter := "input.Channel.Count > 0 && !input.Channel.Noticeable && input.Messages.all(m, input.UserMap[m.UserId].Bot)"
+			setting, ok := settingMap[token.ID.String()]
+			if ok && len(setting.Filter) > 0 {
+				filter = setting.Filter
+			}
+			go clearUnreadMessages(ctx, token.ID.String(), userMap, filter)
 		}
 	}
 }
@@ -235,14 +270,18 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	collection := mongoClient.Database(dbName).Collection(collectionNameToken)
-	doc := TokenSchema{
-		ID:           uuid.MustParse(myUser.Id),
-		AccessToken:  token.AccessToken,
-		TokenType:    token.TokenType,
-		RefreshToken: token.RefreshToken,
-		Expiry:       token.Expiry,
-	}
-	if _, err := collection.InsertOne(ctx, doc); err != nil {
+	update := bson.D{{
+		Key: "$set",
+		Value: bson.D{
+			{Key: "_id", Value: uuid.MustParse(myUser.Id)},
+			{Key: "accessToken", Value: token.AccessToken},
+			{Key: "tokenType", Value: token.TokenType},
+			{Key: "refreshToken", Value: token.RefreshToken},
+			{Key: "expiry", Value: token.Expiry},
+		},
+	}}
+	opts := options.Update().SetUpsert(true)
+	if _, err := collection.UpdateByID(ctx, uuid.MustParse(myUser.Id), update, opts); err != nil {
 		internalHTTPError(w, err, "failed to insert tokencollection")
 		return
 	}
@@ -261,20 +300,22 @@ func internalHTTPError(w http.ResponseWriter, err error, msg string) {
 	http.Error(w, msg, http.StatusInternalServerError)
 }
 
-func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]traq.User) {
+func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]traq.User, celFilter string) {
 	myUnreadChannels, resp, err := apiClient.MeApi.GetMyUnreadChannels(ctx).Execute()
-	if err != nil {
-		slog.ErrorContext(ctx, "get my unread channels", "err", err)
-	} else if resp.StatusCode != http.StatusOK {
-		slog.ErrorContext(ctx, "get my unread channels", "status", resp.Status, "statusCode", resp.StatusCode)
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
+	if err != nil || resp.StatusCode != http.StatusOK {
+		l := slog.With("err", err)
+		if resp != nil {
+			l = l.With("status", resp.Status, "statusCode", resp.StatusCode)
+		}
+		l.ErrorContext(ctx, "get my unread channels", "err", err)
+
 		notifyFromBot(userID, "BOT未読を自動で消化するために再認可を行ってください")
 		collection := mongoClient.Database(dbName).Collection(collectionNameToken)
-		filter := bson.D{{Key: "_id", Value: userID}}
+		filter := bson.D{{Key: "userID", Value: userID}}
 		if _, err := collection.DeleteOne(ctx, filter); err != nil {
 			slog.ErrorContext(ctx, "delete token collection", "err", err)
 		}
+
 		return
 	}
 
@@ -288,17 +329,20 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 		messages, resp, err := apiClient.ChannelApi.GetMessages(ctx, channel.ChannelId).Limit(channel.Count).Since(channel.Since).Inclusive(true).Execute()
 		if err != nil {
 			l.ErrorContext(ctx, "get my unread messages", "err", err)
+			return
 		} else if resp.StatusCode != http.StatusOK {
 			l.ErrorContext(ctx, "get my unread messages", "status", resp.Status, "statusCode", resp.StatusCode)
+			return
 		}
 
-		canClearMessages := true
-		for _, message := range messages {
-			user, ok := userMap[message.UserId]
-			if !ok || !user.Bot {
-				canClearMessages = false
-				break
-			}
+		canClearMessages, err := evaluateCEL(ctx, celFilter, CELInput{
+			Channel:  channel,
+			Messages: messages,
+			UserMap:  userMap,
+		})
+		if err != nil {
+			l.ErrorContext(ctx, "evaluate CEL", "err", err)
+			return
 		}
 		if !canClearMessages {
 			continue
@@ -307,8 +351,10 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 		resp, err = apiClient.MeApi.ReadChannel(ctx, channel.ChannelId).Execute()
 		if err != nil {
 			l.ErrorContext(ctx, "clear unread messages", "err", err)
+			return
 		} else if resp.StatusCode != http.StatusNoContent {
 			l.ErrorContext(ctx, "clear unread messages", "status", resp.Status, "statusCode", resp.StatusCode)
+			return
 		}
 	}
 }
@@ -323,4 +369,43 @@ func notifyFromBot(userID string, content string) {
 	} else if resp.StatusCode != http.StatusNoContent {
 		slog.ErrorContext(ctx, "post bot message", "status", resp.Status, "statusCode", resp.StatusCode)
 	}
+}
+
+type CELInput struct {
+	Channel  traq.UnreadChannel
+	Messages []traq.Message
+	UserMap  map[string]traq.User
+}
+
+var celEnv, _ = cel.NewEnv(
+	cel.Variable("input", cel.ObjectType("main.CELInput")),
+	ext.NativeTypes(
+		reflect.TypeFor[CELInput](),
+		reflect.TypeFor[traq.Message](),
+		reflect.TypeFor[traq.User](),
+	),
+)
+
+func evaluateCEL(ctx context.Context, celProgram string, input CELInput) (bool, error) {
+	ast, iss := celEnv.Compile(celProgram)
+	if err := iss.Err(); err != nil {
+		return false, err
+	}
+
+	prg, err := celEnv.Program(ast)
+	if err != nil {
+		return false, err
+	}
+
+	output, _, err := prg.ContextEval(ctx, map[string]any{"input": input})
+	if err != nil {
+		return false, err
+	}
+
+	outputBool, ok := output.Value().(bool)
+	if !ok {
+		return false, fmt.Errorf("output of the program must be a boolean type")
+	}
+
+	return outputBool, nil
 }

@@ -1,0 +1,36 @@
+version: "3.9"
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      MONGODB_USER: root
+      MONGODB_PASSWORD: password
+      MONGODB_HOSTNAME: mongodb
+      MONGODB_PORT: 27017
+      MONGODB_DATABASE: admin
+      SESSION_KEY:
+      TRAQ_CLIENT_ID:
+      TRAQ_CLIENT_SECRET:
+      TRAQ_REDIRECT_URL:
+      TRAQ_BOT_ACCESS_TOKEN:
+    depends_on:
+      - mongodb
+
+  mongodb:
+    image: mongo:8.0.4
+    container_name: mongodb
+    expose:
+      - "27017"
+    volumes:
+      - mongodb_backup:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: password
+
+volumes:
+  mongodb_backup:
+    driver: local
