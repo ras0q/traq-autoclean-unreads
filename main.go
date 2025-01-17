@@ -65,6 +65,21 @@ type SettingSchema struct {
 	Filter string    // CEL (https://cel.dev/) evaluation
 }
 
+type CELInput struct {
+	Channel  traq.UnreadChannel
+	Messages []traq.Message
+	UserMap  map[string]traq.User
+}
+
+var celEnv, _ = cel.NewEnv(
+	cel.Variable("input", cel.ObjectType("main.CELInput")),
+	ext.NativeTypes(
+		reflect.TypeFor[CELInput](),
+		reflect.TypeFor[traq.Message](),
+		reflect.TypeFor[traq.User](),
+	),
+)
+
 //go:embed index.html
 var indexHTML string
 
@@ -189,6 +204,101 @@ func runClearner() {
 	}
 }
 
+func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]traq.User, celFilter string) {
+	myUnreadChannels, resp, err := apiClient.MeApi.GetMyUnreadChannels(ctx).Execute()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		l := slog.With("err", err)
+		if resp != nil {
+			l = l.With("status", resp.Status, "statusCode", resp.StatusCode)
+		}
+		l.ErrorContext(ctx, "get my unread channels", "err", err)
+
+		notifyFromBot(userID, "BOT未読を自動で消化するために再認可を行ってください")
+		collection := mongoClient.Database(dbName).Collection(collectionNameToken)
+		filter := bson.D{{Key: "userID", Value: userID}}
+		if _, err := collection.DeleteOne(ctx, filter); err != nil {
+			slog.ErrorContext(ctx, "delete token collection", "err", err)
+		}
+
+		return
+	}
+
+	for _, channel := range myUnreadChannels {
+		if channel.Count == 0 || channel.Noticeable {
+			continue
+		}
+
+		l := slog.With("channelId", channel.ChannelId)
+
+		messages, resp, err := apiClient.ChannelApi.GetMessages(ctx, channel.ChannelId).Limit(channel.Count).Since(channel.Since).Inclusive(true).Execute()
+		if err != nil {
+			l.ErrorContext(ctx, "get my unread messages", "err", err)
+			return
+		} else if resp.StatusCode != http.StatusOK {
+			l.ErrorContext(ctx, "get my unread messages", "status", resp.Status, "statusCode", resp.StatusCode)
+			return
+		}
+
+		canClearMessages, err := evaluateCEL(ctx, celFilter, CELInput{
+			Channel:  channel,
+			Messages: messages,
+			UserMap:  userMap,
+		})
+		if err != nil {
+			l.ErrorContext(ctx, "evaluate CEL", "err", err)
+			return
+		}
+		if !canClearMessages {
+			continue
+		}
+
+		resp, err = apiClient.MeApi.ReadChannel(ctx, channel.ChannelId).Execute()
+		if err != nil {
+			l.ErrorContext(ctx, "clear unread messages", "err", err)
+			return
+		} else if resp.StatusCode != http.StatusNoContent {
+			l.ErrorContext(ctx, "clear unread messages", "status", resp.Status, "statusCode", resp.StatusCode)
+			return
+		}
+	}
+}
+
+func notifyFromBot(userID string, content string) {
+	ctx := context.WithValue(context.Background(), traq.ContextAccessToken, botAccessToken)
+	_, resp, err := apiClient.MessageApi.PostDirectMessage(ctx, userID).
+		PostMessageRequest(traq.PostMessageRequest{Content: content}).
+		Execute()
+	if err != nil {
+		slog.ErrorContext(ctx, "post bot message", "err", err)
+	} else if resp.StatusCode != http.StatusNoContent {
+		slog.ErrorContext(ctx, "post bot message", "status", resp.Status, "statusCode", resp.StatusCode)
+	}
+}
+
+func evaluateCEL(ctx context.Context, celProgram string, input CELInput) (bool, error) {
+	ast, iss := celEnv.Compile(celProgram)
+	if err := iss.Err(); err != nil {
+		return false, err
+	}
+
+	prg, err := celEnv.Program(ast)
+	if err != nil {
+		return false, err
+	}
+
+	output, _, err := prg.ContextEval(ctx, map[string]any{"input": input})
+	if err != nil {
+		return false, err
+	}
+
+	outputBool, ok := output.Value().(bool)
+	if !ok {
+		return false, fmt.Errorf("output of the program must be a boolean type")
+	}
+
+	return outputBool, nil
+}
+
 func authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	session, err := store.Get(r, sessionName)
 	if err != nil {
@@ -298,114 +408,4 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 func internalHTTPError(w http.ResponseWriter, err error, msg string) {
 	slog.Error("Internal Server Error", "err", err, "msg", msg)
 	http.Error(w, msg, http.StatusInternalServerError)
-}
-
-func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]traq.User, celFilter string) {
-	myUnreadChannels, resp, err := apiClient.MeApi.GetMyUnreadChannels(ctx).Execute()
-	if err != nil || resp.StatusCode != http.StatusOK {
-		l := slog.With("err", err)
-		if resp != nil {
-			l = l.With("status", resp.Status, "statusCode", resp.StatusCode)
-		}
-		l.ErrorContext(ctx, "get my unread channels", "err", err)
-
-		notifyFromBot(userID, "BOT未読を自動で消化するために再認可を行ってください")
-		collection := mongoClient.Database(dbName).Collection(collectionNameToken)
-		filter := bson.D{{Key: "userID", Value: userID}}
-		if _, err := collection.DeleteOne(ctx, filter); err != nil {
-			slog.ErrorContext(ctx, "delete token collection", "err", err)
-		}
-
-		return
-	}
-
-	for _, channel := range myUnreadChannels {
-		if channel.Count == 0 || channel.Noticeable {
-			continue
-		}
-
-		l := slog.With("channelId", channel.ChannelId)
-
-		messages, resp, err := apiClient.ChannelApi.GetMessages(ctx, channel.ChannelId).Limit(channel.Count).Since(channel.Since).Inclusive(true).Execute()
-		if err != nil {
-			l.ErrorContext(ctx, "get my unread messages", "err", err)
-			return
-		} else if resp.StatusCode != http.StatusOK {
-			l.ErrorContext(ctx, "get my unread messages", "status", resp.Status, "statusCode", resp.StatusCode)
-			return
-		}
-
-		canClearMessages, err := evaluateCEL(ctx, celFilter, CELInput{
-			Channel:  channel,
-			Messages: messages,
-			UserMap:  userMap,
-		})
-		if err != nil {
-			l.ErrorContext(ctx, "evaluate CEL", "err", err)
-			return
-		}
-		if !canClearMessages {
-			continue
-		}
-
-		resp, err = apiClient.MeApi.ReadChannel(ctx, channel.ChannelId).Execute()
-		if err != nil {
-			l.ErrorContext(ctx, "clear unread messages", "err", err)
-			return
-		} else if resp.StatusCode != http.StatusNoContent {
-			l.ErrorContext(ctx, "clear unread messages", "status", resp.Status, "statusCode", resp.StatusCode)
-			return
-		}
-	}
-}
-
-func notifyFromBot(userID string, content string) {
-	ctx := context.WithValue(context.Background(), traq.ContextAccessToken, botAccessToken)
-	_, resp, err := apiClient.MessageApi.PostDirectMessage(ctx, userID).
-		PostMessageRequest(traq.PostMessageRequest{Content: content}).
-		Execute()
-	if err != nil {
-		slog.ErrorContext(ctx, "post bot message", "err", err)
-	} else if resp.StatusCode != http.StatusNoContent {
-		slog.ErrorContext(ctx, "post bot message", "status", resp.Status, "statusCode", resp.StatusCode)
-	}
-}
-
-type CELInput struct {
-	Channel  traq.UnreadChannel
-	Messages []traq.Message
-	UserMap  map[string]traq.User
-}
-
-var celEnv, _ = cel.NewEnv(
-	cel.Variable("input", cel.ObjectType("main.CELInput")),
-	ext.NativeTypes(
-		reflect.TypeFor[CELInput](),
-		reflect.TypeFor[traq.Message](),
-		reflect.TypeFor[traq.User](),
-	),
-)
-
-func evaluateCEL(ctx context.Context, celProgram string, input CELInput) (bool, error) {
-	ast, iss := celEnv.Compile(celProgram)
-	if err := iss.Err(); err != nil {
-		return false, err
-	}
-
-	prg, err := celEnv.Program(ast)
-	if err != nil {
-		return false, err
-	}
-
-	output, _, err := prg.ContextEval(ctx, map[string]any{"input": input})
-	if err != nil {
-		return false, err
-	}
-
-	outputBool, ok := output.Value().(bool)
-	if !ok {
-		return false, fmt.Errorf("output of the program must be a boolean type")
-	}
-
-	return outputBool, nil
 }
