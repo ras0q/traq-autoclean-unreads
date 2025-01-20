@@ -1,12 +1,9 @@
 package main
 
 import (
-	"cmp"
 	"context"
-	"crypto/rand"
 	_ "embed"
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,10 +14,10 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
-	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
+	"github.com/ras0q/traq-autoclean-unreads/internal/handler"
+	"github.com/ras0q/traq-autoclean-unreads/internal/repository"
 	"github.com/traPtitech/go-traq"
-	traqoauth2 "github.com/traPtitech/go-traq-oauth2"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -28,44 +25,17 @@ import (
 )
 
 const (
-	sessionName = "session_name"
-	stateLength = 16
-	addr        = ":8080"
+	addr = ":8080"
 )
-
-var store = sessions.NewCookieStore([]byte(os.Getenv("SESSION_KEY")))
-
-// Configure at https://bot-console.trap.jp/clients
-var oauth2Config = oauth2.Config{
-	ClientID:     os.Getenv("TRAQ_CLIENT_ID"),
-	ClientSecret: os.Getenv("TRAQ_CLIENT_SECRET"),
-	Endpoint:     traqoauth2.Prod, // or traqoauth2.Staging
-	RedirectURL:  os.Getenv("TRAQ_REDIRECT_URL"),
-	Scopes:       []string{traqoauth2.ScopeRead, traqoauth2.ScopeWrite},
-}
 
 var apiClient = traq.NewAPIClient(traq.NewConfiguration())
 var botAccessToken = os.Getenv("TRAQ_BOT_ACCESS_TOKEN")
 
 var mongoClient *mongo.Client
-var mongoURI = os.Getenv("MONGODB_URI")
 var dbName = os.Getenv("MONGODB_DATABASE")
 
 const collectionNameToken = "tokens"
 const collectionNameSetting = "settings"
-
-type TokenSchema struct {
-	ID           uuid.UUID `bson:"_id"` // traQ userID
-	AccessToken  string
-	TokenType    string
-	RefreshToken string
-	Expiry       time.Time
-}
-
-type SettingSchema struct {
-	ID     uuid.UUID `bson:"_id"` // traQ userID
-	Filter string    // CEL (https://cel.dev/) evaluation
-}
 
 type CELInput struct {
 	Channel          traq.UnreadChannel
@@ -123,9 +93,17 @@ func main() {
 
 	go runClearner()
 
-	http.HandleFunc("GET /", indexHandler)
-	http.HandleFunc("POST /oauth2/authorize", authorizeHandler)
-	http.HandleFunc("GET /oauth2/callback", callbackHandler)
+	h := handler.Handler{
+		SessionName:  "session_name",
+		StateLength:  16,
+		SessionStore: sessions.NewCookieStore([]byte(os.Getenv("SESSION_KEY"))),
+		DB:           mongoClient.Database(dbName),
+		APIClient:    apiClient,
+	}
+
+	http.HandleFunc("GET /", h.Index)
+	http.HandleFunc("POST /oauth2/authorize", h.Authorize)
+	http.HandleFunc("GET /oauth2/callback", h.Callback)
 
 	slog.Info("Server starting...", "addr", addr)
 	panic(http.ListenAndServe(addr, nil)) // TODO: graceful shutdown
@@ -145,7 +123,7 @@ func runClearner() {
 			continue
 		}
 
-		var tokens []TokenSchema
+		var tokens []repository.TokenSchema
 		if err := cursor.All(ctx, &tokens); err != nil {
 			slog.Error("iterate cursor", "err", err)
 			continue
@@ -164,13 +142,13 @@ func runClearner() {
 			continue
 		}
 
-		var settings []SettingSchema
+		var settings []repository.SettingSchema
 		if err := cursor.All(ctx, &settings); err != nil {
 			slog.Error("iterate cursor", "err", err)
 			continue
 		}
 
-		settingMap := make(map[string]SettingSchema, len(settings))
+		settingMap := make(map[string]repository.SettingSchema, len(settings))
 		for _, setting := range settings {
 			settingMap[setting.ID.String()] = setting
 		}
@@ -206,7 +184,7 @@ func runClearner() {
 
 		for _, token := range tokens {
 			ctx := context.Background()
-			tokenSource := oauth2Config.TokenSource(ctx, &oauth2.Token{
+			tokenSource := handler.OAuth2Config.TokenSource(ctx, &oauth2.Token{
 				AccessToken:  token.AccessToken,
 				TokenType:    token.TokenType,
 				RefreshToken: token.RefreshToken,
@@ -321,162 +299,4 @@ func evaluateCEL(ctx context.Context, celProgram string, input CELInput) (bool, 
 	}
 
 	return outputBool, nil
-}
-
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := store.Get(r, sessionName)
-	if err != nil {
-		internalHTTPError(w, err, "failed to get session")
-		return
-	}
-
-	var userID string
-	if _userID, ok := session.Values["user_id"]; ok {
-		userID = _userID.(string)
-	}
-
-	var setting SettingSchema
-	collection := mongoClient.Database(dbName).Collection(collectionNameSetting)
-	err = collection.FindOne(r.Context(), bson.D{{Key: "_id", Value: userID}}).Decode(&setting)
-	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
-		internalHTTPError(w, err, "failed to get setting")
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>traq-autoclean-unreads</title>
-</head>
-<body>
-    <h1>traq-autoclean-unreads</h1>
-    <p>定期的に各チャンネルの未読状況を確認し、BOT以外の投稿がなければ自動でそのチャンネルの未読を消化します。</p>
-    <p>UserID: %s</p>
-    <p>Filter: <code>%s</code></p>
-    <form method="POST" action="/oauth2/authorize">
-        <button type="submit">Authorize</button>
-    </form>
-    <p>トークンの破棄はまだ実装されていません。直接<a href="https://q.trap.jp/settings/session">traQ</a>から行ってね。</p>
-</body>
-</html>`,
-		cmp.Or(userID, "未ログイン"),
-		cmp.Or(setting.Filter, defaultFilter),
-	)
-}
-
-func authorizeHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := store.Get(r, sessionName)
-	if err != nil {
-		internalHTTPError(w, err, "failed to get session")
-		return
-	}
-
-	codeVerifier := oauth2.GenerateVerifier()
-	session.Values["code_verifier"] = codeVerifier
-
-	state := make([]byte, stateLength)
-	_, _ = rand.Read(state)
-	session.Values["state"] = string(state)
-
-	if err := session.Save(r, w); err != nil {
-		internalHTTPError(w, err, "failed to save session")
-		return
-	}
-
-	// this client forces to use PKCE
-	// code_challenge_method = S256 is set by S256ChallengeOption
-	authCodeURL := oauth2Config.AuthCodeURL(
-		string(state),
-		oauth2.S256ChallengeOption(codeVerifier),
-	)
-
-	http.Redirect(w, r, authCodeURL, http.StatusFound)
-}
-
-func callbackHandler(w http.ResponseWriter, r *http.Request) {
-	// query parameters
-	var (
-		code  = r.URL.Query().Get("code")
-		state = r.URL.Query().Get("state")
-	)
-
-	if code == "" {
-		http.Error(w, "code is empty", http.StatusBadRequest)
-		return
-	}
-
-	session, err := store.Get(r, sessionName)
-	if err != nil {
-		internalHTTPError(w, err, "failed to get session")
-		return
-	}
-
-	codeVerifier, ok := session.Values["code_verifier"]
-	if !ok {
-		http.Error(w, "invalid session", http.StatusBadRequest)
-		return
-	}
-
-	if storedState, ok := session.Values["state"]; !ok || storedState.(string) != state {
-		http.Error(w, "invalid state", http.StatusBadRequest)
-		return
-	}
-
-	token, err := oauth2Config.Exchange(
-		r.Context(),
-		code,
-		oauth2.VerifierOption(codeVerifier.(string)),
-	)
-	if err != nil {
-		internalHTTPError(w, err, "failed to exchange token")
-		return
-	}
-
-	ctx := r.Context()
-	tokenSource := oauth2Config.TokenSource(ctx, token)
-	ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
-	myUser, resp, err := apiClient.MeApi.GetMe(ctx).Execute()
-	if err != nil {
-		internalHTTPError(w, err, "failed to get my user info")
-		return
-	} else if resp.StatusCode != http.StatusOK {
-		internalHTTPError(w, fmt.Errorf("invalid status: %d", resp.StatusCode), "failed to get my user info")
-		return
-	}
-
-	collection := mongoClient.Database(dbName).Collection(collectionNameToken)
-	update := bson.D{{
-		Key: "$set",
-		Value: bson.D{
-			{Key: "_id", Value: uuid.MustParse(myUser.Id)},
-			{Key: "accessToken", Value: token.AccessToken},
-			{Key: "tokenType", Value: token.TokenType},
-			{Key: "refreshToken", Value: token.RefreshToken},
-			{Key: "expiry", Value: token.Expiry},
-		},
-	}}
-	opts := options.Update().SetUpsert(true)
-	if _, err := collection.UpdateByID(ctx, uuid.MustParse(myUser.Id), update, opts); err != nil {
-		internalHTTPError(w, err, "failed to insert tokencollection")
-		return
-	}
-
-	session.Values["token"] = token
-	session.Values["user_id"] = myUser.Id
-	session.Values["username"] = myUser.Name
-	if err := session.Save(r, w); err != nil {
-		internalHTTPError(w, err, "failed to save session")
-		return
-	}
-
-	_, _ = w.Write([]byte("正常に登録されました。定期的にBOT投稿のみの未読を自動で消化します。"))
-}
-
-func internalHTTPError(w http.ResponseWriter, err error, msg string) {
-	slog.Error("Internal Server Error", "err", err, "msg", msg)
-	http.Error(w, msg, http.StatusInternalServerError)
 }
