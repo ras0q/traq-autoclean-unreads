@@ -68,12 +68,16 @@ type SettingSchema struct {
 }
 
 type CELInput struct {
-	Channel  traq.UnreadChannel
-	Messages []traq.Message
-	UserMap  map[string]traq.User
+	Channel          traq.UnreadChannel
+	Messages         []traq.Message
+	PublicChannelMap map[string]traq.Channel
+	UserMap          map[string]traq.User
 }
 
-const defaultFilter = "input.Channel.Count > 0 && !input.Channel.Noticeable && input.Messages.all(m, input.UserMap[m.UserId].Bot)"
+const defaultFilter = `input.Channel.Count > 0
+&& !input.Channel.Noticeable
+&& input.Channel.ChannelId in input.PublicChannelMap
+&& input.Messages.all(m, input.UserMap[m.UserId].Bot)`
 
 var celEnv, _ = cel.NewEnv(
 	cel.Variable("input", cel.ObjectType("main.CELInput")),
@@ -175,13 +179,29 @@ func runClearner() {
 		users, resp, err := apiClient.UserApi.GetUsers(ctx).IncludeSuspended(true).Execute()
 		if err != nil {
 			slog.ErrorContext(ctx, "get users", "err", err)
+			continue
 		} else if resp.StatusCode != http.StatusOK {
 			slog.ErrorContext(ctx, "get users", "status", resp.Status, "statusCode", resp.StatusCode)
+			continue
 		}
 
 		userMap := make(map[string]traq.User, len(users))
 		for _, user := range users {
 			userMap[user.Id] = user
+		}
+
+		channels, resp, err := apiClient.ChannelApi.GetChannels(ctx).Execute()
+		if err != nil {
+			slog.ErrorContext(ctx, "get channels", "err", err)
+			continue
+		} else if resp.StatusCode != http.StatusOK {
+			slog.ErrorContext(ctx, "get channels", "status", resp.Status, "statusCode", resp.StatusCode)
+			continue
+		}
+
+		publicChannelMap := make(map[string]traq.Channel, len(users))
+		for _, channel := range channels.Public {
+			publicChannelMap[channel.Id] = channel
 		}
 
 		for _, token := range tokens {
@@ -199,12 +219,12 @@ func runClearner() {
 			if ok && len(setting.Filter) > 0 {
 				filter = setting.Filter
 			}
-			go clearUnreadMessages(ctx, token.ID.String(), userMap, filter)
+			go clearUnreadMessages(ctx, token.ID.String(), userMap, publicChannelMap, filter)
 		}
 	}
 }
 
-func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]traq.User, celFilter string) {
+func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]traq.User, publicChannelMap map[string]traq.Channel, celFilter string) {
 	myUnreadChannels, resp, err := apiClient.MeApi.GetMyUnreadChannels(ctx).Execute()
 	if err != nil || resp.StatusCode != http.StatusOK {
 		l := slog.With("err", err)
@@ -240,9 +260,10 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 		}
 
 		canClearMessages, err := evaluateCEL(ctx, celFilter, CELInput{
-			Channel:  channel,
-			Messages: messages,
-			UserMap:  userMap,
+			Channel:          channel,
+			Messages:         messages,
+			PublicChannelMap: publicChannelMap,
+			UserMap:          userMap,
 		})
 		if err != nil {
 			l.ErrorContext(ctx, "evaluate CEL", "err", err)
