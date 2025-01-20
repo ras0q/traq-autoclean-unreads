@@ -69,11 +69,13 @@ func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var setting repository.SettingSchema
-	collection := h.DB.Collection("settings")
-	err = collection.FindOne(r.Context(), bson.D{{Key: "_id", Value: uuid.MustParse(userID)}}).Decode(&setting)
-	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
-		internalHTTPError(w, err, "failed to get setting")
-		return
+	if len(userID) > 0 {
+		collection := h.DB.Collection("settings")
+		err = collection.FindOne(r.Context(), bson.D{{Key: "_id", Value: uuid.MustParse(userID)}}).Decode(&setting)
+		if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+			internalHTTPError(w, err, "failed to get setting")
+			return
+		}
 	}
 
 	tmpl, err := template.ParseFS(fs, "index.html")
@@ -195,9 +197,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session.Values["token"] = token
 	session.Values["user_id"] = myUser.Id
-	session.Values["username"] = myUser.Name
 	if err := session.Save(r, w); err != nil {
 		internalHTTPError(w, err, "failed to save session")
 		return
@@ -210,6 +210,67 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
+	session, err := h.SessionStore.Get(r, h.SessionName)
+	if err != nil {
+		internalHTTPError(w, err, "failed to get session")
+		return
+	}
+
+	_userID, ok := session.Values["user_id"]
+	if !ok {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+
+	userID := uuid.MustParse(_userID.(string))
+
+	var token repository.TokenSchema
+	collection := h.DB.Collection("tokens")
+	filter := bson.D{{Key: "_id", Value: userID}}
+	if err := collection.FindOne(r.Context(), filter).Decode(&token); err != nil {
+		internalHTTPError(w, err, "failed decode token")
+		return
+	}
+
+	ctx := r.Context()
+	tokenSource := OAuth2Config.TokenSource(ctx, &oauth2.Token{
+		AccessToken:  token.AccessToken,
+		TokenType:    token.TokenType,
+		RefreshToken: token.RefreshToken,
+		Expiry:       token.Expiry,
+	})
+	ctx = context.WithValue(ctx, traq.ContextOAuth2, tokenSource)
+	resp, err := h.APIClient.Oauth2Api.RevokeOAuth2Token(ctx).Token(token.AccessToken).Execute()
+	if err != nil {
+		internalHTTPError(w, err, "failed to revoke OAuth2 token")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		internalHTTPError(w, fmt.Errorf("invalid status (%d %s)", resp.StatusCode, resp.Status), "failed to revoke OAuth2 token")
+	}
+
+	if _, err := collection.DeleteOne(r.Context(), filter); err != nil {
+		internalHTTPError(w, err, "failed to delete token")
+		return
+	}
+
+	session.Values = map[interface{}]interface{}{}
+	session.Options.MaxAge = -1
+	if err := session.Save(r, w); err != nil {
+		internalHTTPError(w, err, "failed to save session")
+		return
+	}
+
+	// HTMX support
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Add("HX-Redirect", "/")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) PutSetting(w http.ResponseWriter, r *http.Request) {

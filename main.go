@@ -69,6 +69,7 @@ func main() {
 	http.HandleFunc("GET /", h.Index)
 	http.HandleFunc("POST /oauth2/authorize", h.Authorize)
 	http.HandleFunc("GET /oauth2/callback", h.Callback)
+	http.HandleFunc("POST /oauth2/revoke", h.Revoke)
 	http.HandleFunc("PUT /settings", h.PutSetting)
 
 	const addr = ":8080"

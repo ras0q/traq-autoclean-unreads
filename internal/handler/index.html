@@ -15,8 +15,7 @@
     {{ if eq .UserID "" }}
         <button hx-post="/oauth2/authorize">ログイン</button>
     {{ else }}
-        <button>ログアウト</button>
-        <p>トークンの破棄(ログアウト)はまだ実装されていません。直接<a href="https://q.trap.jp/settings/session">traQ</a>から行ってね。</p>
+        <button hx-post="/oauth2/revoke">ログアウト</button>
         <h2>フィルター</h2>
         <p>
             未読を消化する条件をカスタムすることができます。フィルターには<a href="https://cel.dev/">CEL</a>という言語が用いられています。<br/>
