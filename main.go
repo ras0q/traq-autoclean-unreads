@@ -247,6 +247,9 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 		if channel.Count == 0 || channel.Noticeable {
 			continue
 		}
+		if _, isPublic := publicChannelMap[channel.ChannelId]; !isPublic {
+			continue
+		}
 
 		l := slog.With("channelId", channel.ChannelId)
 
