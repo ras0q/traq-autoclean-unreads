@@ -18,7 +18,7 @@ type CELInput struct {
 }
 
 var CELEnv, _ = cel.NewEnv(
-	cel.Variable("input", cel.ObjectType("main.CELInput")),
+	cel.Variable("input", cel.ObjectType("filter.CELInput")),
 	ext.NativeTypes(
 		reflect.TypeFor[CELInput](),
 		reflect.TypeFor[traq.Message](),
@@ -26,7 +26,7 @@ var CELEnv, _ = cel.NewEnv(
 	),
 )
 
-const DefaultCELFilter = `input.Channel.Count > 0
+const DefaultCELFilter string = `input.Channel.Count > 0
 && !input.Channel.Noticeable
 && input.Channel.ChannelId in input.PublicChannelMap
 && input.Messages.all(m, input.UserMap[m.UserId].Bot)`

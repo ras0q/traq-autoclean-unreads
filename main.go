@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"encoding/gob"
 	"fmt"
 	"log/slog"
@@ -70,6 +69,7 @@ func main() {
 	http.HandleFunc("GET /", h.Index)
 	http.HandleFunc("POST /oauth2/authorize", h.Authorize)
 	http.HandleFunc("GET /oauth2/callback", h.Callback)
+	http.HandleFunc("PUT /settings", h.PutSetting)
 
 	const addr = ":8080"
 	slog.Info("Server starting...", "addr", addr)

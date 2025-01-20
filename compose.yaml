@@ -19,6 +19,10 @@ services:
       TRAQ_BOT_ACCESS_TOKEN:
     depends_on:
       - mongodb
+    develop:
+      watch:
+        - action: rebuild
+          path: ./
 
   mongodb:
     image: mongo:8.0.4

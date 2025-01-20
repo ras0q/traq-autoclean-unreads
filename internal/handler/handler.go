@@ -4,14 +4,18 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
+	"github.com/ras0q/traq-autoclean-unreads/internal/filter"
 	"github.com/ras0q/traq-autoclean-unreads/internal/repository"
 	"github.com/traPtitech/go-traq"
 	traqoauth2 "github.com/traPtitech/go-traq-oauth2"
@@ -44,6 +48,14 @@ const defaultFilter = `input.Channel.Count > 0
 && input.Channel.ChannelId in input.PublicChannelMap
 && input.Messages.all(m, input.UserMap[m.UserId].Bot)`
 
+//go:embed index.html
+var fs embed.FS
+
+type templateData struct {
+	UserID    string
+	CELFilter string
+}
+
 func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
 	session, err := h.SessionStore.Get(r, h.SessionName)
 	if err != nil {
@@ -64,29 +76,20 @@ func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>traq-autoclean-unreads</title>
-</head>
-<body>
-    <h1>traq-autoclean-unreads</h1>
-    <p>定期的に各チャンネルの未読状況を確認し、BOT以外の投稿がなければ自動でそのチャンネルの未読を消化します。</p>
-    <p>UserID: %s</p>
-    <p>Filter: <code>%s</code></p>
-    <form method="POST" action="/oauth2/authorize">
-        <button type="submit">Authorize</button>
-    </form>
-    <p>トークンの破棄はまだ実装されていません。直接<a href="https://q.trap.jp/settings/session">traQ</a>から行ってね。</p>
-</body>
-</html>`,
-		cmp.Or(userID, "未ログイン"),
-		cmp.Or(setting.Filter, defaultFilter),
-	)
+	tmpl, err := template.ParseFS(fs, "index.html")
+	if err != nil {
+		internalHTTPError(w, err, "failed to parse template")
+		return
+	}
+
+	err = tmpl.Execute(w, templateData{
+		UserID:    userID,
+		CELFilter: cmp.Or(setting.Filter, filter.DefaultCELFilter),
+	})
+	if err != nil {
+		internalHTTPError(w, err, "failed to execute template")
+		return
+	}
 }
 
 func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +117,12 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		string(state),
 		oauth2.S256ChallengeOption(codeVerifier),
 	)
+
+	// HTMX support
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Add("HX-Redirect", authCodeURL)
+		return
+	}
 
 	http.Redirect(w, r, authCodeURL, http.StatusFound)
 }
@@ -194,7 +203,59 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = w.Write([]byte("正常に登録されました。定期的にBOT投稿のみの未読を自動で消化します。"))
+	// HTMX support
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Add("HX-Redirect", "/")
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (h *Handler) PutSetting(w http.ResponseWriter, r *http.Request) {
+	session, err := h.SessionStore.Get(r, h.SessionName)
+	if err != nil {
+		internalHTTPError(w, err, "failed to get session")
+		return
+	}
+
+	_userID, ok := session.Values["user_id"]
+	if !ok {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+
+	userID := uuid.MustParse(_userID.(string))
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	celFilter := r.Form.Get("filter")
+	if len(celFilter) == 0 {
+		http.Error(w, "filter is empty", http.StatusBadRequest)
+		return
+	}
+
+	if _, iss := filter.CELEnv.Compile(celFilter); iss.Err() != nil {
+		http.Error(w, fmt.Sprintf("Failed to compile CEL program:\n%s", iss), http.StatusBadRequest)
+		return
+	}
+
+	collection := h.DB.Collection("settings")
+	update := bson.D{{
+		Key: "$set",
+		Value: bson.D{
+			{Key: "_id", Value: userID},
+			{Key: "filter", Value: celFilter},
+		},
+	}}
+	opts := options.Update().SetUpsert(true)
+	if _, err := collection.UpdateByID(r.Context(), userID, update, opts); err != nil {
+		internalHTTPError(w, err, "failed to insert tokencollection")
+		return
+	}
 }
 
 func internalHTTPError(w http.ResponseWriter, err error, msg string) {
