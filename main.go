@@ -253,7 +253,7 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 
 		l := slog.With("channelId", channel.ChannelId)
 
-		messages, resp, err := apiClient.ChannelApi.GetMessages(ctx, channel.ChannelId).Limit(channel.Count).Since(channel.Since).Inclusive(true).Execute()
+		messages, resp, err := apiClient.ChannelApi.GetMessages(ctx, channel.ChannelId).Limit(min(channel.Count, 200)).Since(channel.Since).Inclusive(true).Execute()
 		if err != nil {
 			l.ErrorContext(ctx, "get my unread messages", "err", err)
 			return
