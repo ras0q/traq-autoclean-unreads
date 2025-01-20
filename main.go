@@ -215,7 +215,7 @@ func clearUnreadMessages(ctx context.Context, userID string, userMap map[string]
 
 		notifyFromBot(userID, "BOT未読を自動で消化するために再認可を行ってください")
 		collection := mongoClient.Database(dbName).Collection(collectionNameToken)
-		filter := bson.D{{Key: "userID", Value: userID}}
+		filter := bson.D{{Key: "_id", Value: userID}}
 		if _, err := collection.DeleteOne(ctx, filter); err != nil {
 			slog.ErrorContext(ctx, "delete token collection", "err", err)
 		}
@@ -270,7 +270,7 @@ func notifyFromBot(userID string, content string) {
 		Execute()
 	if err != nil {
 		slog.ErrorContext(ctx, "post bot message", "err", err)
-	} else if resp.StatusCode != http.StatusNoContent {
+	} else if resp.StatusCode != http.StatusCreated {
 		slog.ErrorContext(ctx, "post bot message", "status", resp.Status, "statusCode", resp.StatusCode)
 	}
 }
