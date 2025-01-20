@@ -6,6 +6,7 @@
     <title>traq-autoclean-unreads</title>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script src="https://unpkg.com/htmx-ext-response-targets@2.0.0/response-targets.js"></script>
+    <meta name="htmx-config" content='{"responseHandling": [{"code":"204", "swap": false}]}'>
 </head>
 <body>
     <h1>traq-autoclean-unreads</h1>
@@ -22,15 +23,15 @@
             言語仕様などは<a href="https://github.com/google/cel-spec/tree/master/doc">google/cel-spec<a>を参照してください。<br/>
             入力は<a href="https://github.com/ras0q/traq-autoclean-unreads/blob/main/internal/filter/cel_filter.go">CELInput</a>で定義されており、出力は真偽値となる必要があります。
         </p>
-        <form hx-ext="response-targets" hx-put="/settings" hx-target-*="#result" hx-swap="textContent">
+        <form hx-ext="response-targets" hx-put="/settings" hx-target-*="next" hx-swap="textContent">
             <textarea
                 name="filter"
                 placeholder="フィルターをCEL言語で記述"
-                style="font-family:monospace;width:80%;height:10rem;"
+                style="display:block; font-family:monospace; width:80%; height:10rem;"
             >{{.CELFilter}}</textarea>
             <button type="submit">変更</button>
         </form>
-        <code id="result" style="white-space:pre-wrap;"></code>
+        <code style="display:block; width:100%; white-space:pre-wrap;"></code>
     {{ end }}
 </body>
 </html>

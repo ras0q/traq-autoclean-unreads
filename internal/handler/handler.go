@@ -70,7 +70,7 @@ func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
 
 	var setting repository.SettingSchema
 	collection := h.DB.Collection("settings")
-	err = collection.FindOne(r.Context(), bson.D{{Key: "_id", Value: userID}}).Decode(&setting)
+	err = collection.FindOne(r.Context(), bson.D{{Key: "_id", Value: uuid.MustParse(userID)}}).Decode(&setting)
 	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
 		internalHTTPError(w, err, "failed to get setting")
 		return
@@ -256,6 +256,8 @@ func (h *Handler) PutSetting(w http.ResponseWriter, r *http.Request) {
 		internalHTTPError(w, err, "failed to insert tokencollection")
 		return
 	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func internalHTTPError(w http.ResponseWriter, err error, msg string) {
