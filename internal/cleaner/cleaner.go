@@ -124,7 +124,7 @@ func (c *Cleaner) cleanUnreadMessages(token repository.TokenSchema, userMap map[
 		ctx = config.CtxWithAccessToken(ctx)
 		_, resp, err := c.APIClient.MessageApi.PostDirectMessage(ctx, token.ID.String()).
 			PostMessageRequest(traq.PostMessageRequest{
-				Content: "autoclean-unreadsでアクセストークンが失効したかエラーが発生したため古いアクセストークンを削除しました。" +
+				Content: "https://autoclean-unreads.trap.show/ でアクセストークンが失効したかエラーが発生したため古いアクセストークンを削除しました。" +
 					"意図しないエラーの場合は再度認可を行ってください。",
 			}).
 			Execute()
